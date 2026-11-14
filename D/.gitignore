@@ -1,0 +1,5 @@
+data/
+results/
+teamkit/
+experiments.csv
+__pycache__/
