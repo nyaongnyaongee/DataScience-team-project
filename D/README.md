@@ -8,7 +8,7 @@
 
 ## 실험 표
 
-| 실험 ID | 모델 및 조합명 | 파라미터 | val_recall@20 | test |
+| experiment_id | model_or_combination | parameters | val_recall@20 | test |
 |---|---|---|---|---|
 | D001 | Popularity | 키트 예제 | 0.02284 | |
 | D002 | Content kNN (메타데이터 one-hot) | 카테고리·store·가격·dept, k ∈ {2,5,10,20,50,100,200,500} → 최고 k=10 | 0.02340 | |
