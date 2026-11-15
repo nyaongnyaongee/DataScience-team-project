@@ -2,6 +2,9 @@
 
 - EASE (Steck 2019): B = -P/diag(P), P = (XᵀX + λI)⁻¹, diag(B)=0. 점수 X·B.
 - RP3β (Paudel 2017): W = (P_iu^α · P_ui^α) / pop_j^β, 행마다 top-k. 점수 X·W.
+- BM25-Shrink ItemKNN (팀원 B 노트북 B051-B154 셀 3·4의 '상품별 IDF' 방식을 GPU로 옮김):
+  유저 행에 BM25 가중치(아이템 IDF × 유저 길이 정규화), 아이템 열끼리 dot / ((‖i‖‖j‖)^power + shrink),
+  행마다 top-k 이웃. 점수 = 유저별 최대값 정규화 BM25 × (1-pop) + pop × 인기도/최대 인기도.
 - iALS (Hu 2008): 신뢰도 c = 1 + α·x, 정확 해 ALS (유저·아이템 교대로 batched solve).
 
 학습 데이터만 읽는다. val 모드에서는 evaluate.py(키트 score)로 채점한다.
@@ -50,6 +53,34 @@ def rp3b(X: sp.csr_matrix, alpha: float, beta: float, k: int) -> torch.Tensor:
     return C.topk_sparsify(W, k)
 
 
+def bm25_sim(X: sp.csr_matrix, k1: float, b: float, shrink: float, power: float, k: int) -> torch.Tensor:
+    Xd = dense_X(X)
+    ulen = Xd.sum(1)
+    avg = ulen[ulen > 0].mean()
+    ifreq = Xd.sum(0)
+    idf = torch.log1p((X.shape[0] - ifreq + 0.5) / (ifreq + 0.5))
+    lnorm = k1 * (1.0 - b + b * ulen / avg)
+    Xd.mul_(idf[None, :]).mul_(((k1 + 1.0) / (1.0 + lnorm))[:, None])
+    dots = Xd.T @ Xd
+    norms = torch.sqrt(torch.diagonal(dots).clone())
+    del Xd
+    dots.div_((norms[:, None] * norms[None, :]).pow(power) + shrink)
+    return C.topk_sparsify(dots, k)
+
+
+def bm25_score_fn(X: sp.csr_matrix, W: torch.Tensor, pop: np.ndarray, pop_w: float):
+    popn = torch.from_numpy(pop / pop.max()).float().to(C.DEVICE)
+
+    def fn(us):
+        xb = torch.from_numpy(X[us].toarray()).to(C.DEVICE)
+        s = xb @ W
+        s[xb > 0] = 0
+        mx = s.max(1, keepdim=True).values
+        s = torch.where(mx > 0, s / mx.clamp(min=1e-12), s)
+        return (1 - pop_w) * s + pop_w * popn[None, :]
+    return fn
+
+
 def ials(X: sp.csr_matrix, d: int, alpha: float, reg: float, iters: int, seed: int,
          chunk: int = 20000) -> tuple[torch.Tensor, torch.Tensor]:
     torch.manual_seed(seed)
@@ -93,7 +124,7 @@ def ials(X: sp.csr_matrix, d: int, alpha: float, reg: float, iters: int, seed: i
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("model", choices=["ease", "rp3b", "ials"])
+    ap.add_argument("model", choices=["ease", "rp3b", "ials", "bm25"])
     ap.add_argument("--lam", type=float, default=500)
     ap.add_argument("--alpha", type=float, default=1.0)
     ap.add_argument("--beta", type=float, default=0.4)
@@ -102,6 +133,11 @@ def main() -> None:
     ap.add_argument("--reg", type=float, default=1.0)
     ap.add_argument("--iters", type=int, default=15)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--k1", type=float, default=1.2)
+    ap.add_argument("--b", type=float, default=0.75)
+    ap.add_argument("--shrink", type=float, default=50)
+    ap.add_argument("--power", type=float, default=0.5)
+    ap.add_argument("--pop", type=float, default=0.4, help="bm25: 인기도 혼합 비율")
     ap.add_argument("--mode", default="val", choices=list(C.MODES))
     ap.add_argument("--no-log", action="store_true")
     a = ap.parse_args()
@@ -117,6 +153,10 @@ def main() -> None:
         elif a.model == "rp3b":
             name = f"rp3b_a{a.alpha:g}_b{a.beta:g}_k{a.k}"
             items, scores = C.recommend_item_item(X, rp3b(X, a.alpha, a.beta, a.k), users, pop)
+        elif a.model == "bm25":
+            name = f"bm25_k{a.k}_sh{a.shrink:g}_pw{a.power:g}_p{a.pop:g}" + (f"_b{a.b:g}" if a.b != 0.75 else "") + (f"_k1{a.k1:g}" if a.k1 != 1.2 else "")
+            W = bm25_sim(X, a.k1, a.b, a.shrink, a.power, a.k)
+            items, scores = C.recommend_scores_fn(bm25_score_fn(X, W, pop, a.pop), X, users, pop)
         else:
             name = f"ials_d{a.d}_a{a.alpha:g}_r{a.reg:g}_it{a.iters}_s{a.seed}"
             seed = str(a.seed)

@@ -28,6 +28,14 @@ MODES = {
     "final": {"fit": DATA / "train.csv", "users": DATA / "test.csv"},
     # reranker 학습용 내부 split: teamkit split --train validation/val_train.csv 로 만든 것
     "inner": {"fit": DATA / "inner/val_train.csv", "users": DATA / "inner/val_users.csv"},
+    # 두 번째 내부 split (seed 8): reranker 학습 데이터 늘리기용 (D048)
+    "inner2": {"fit": DATA / "inner2/val_train.csv", "users": DATA / "inner2/val_users.csv"},
+    "inner3": {"fit": DATA / "inner3/val_train.csv", "users": DATA / "inner3/val_users.csv"},
+    "inner4": {"fit": DATA / "inner4/val_train.csv", "users": DATA / "inner4/val_users.csv"},
+    "inner5": {"fit": DATA / "inner5/val_train.csv", "users": DATA / "inner5/val_users.csv"},
+    "inner6": {"fit": DATA / "inner6/val_train.csv", "users": DATA / "inner6/val_users.csv"},
+    "inner7": {"fit": DATA / "inner7/val_train.csv", "users": DATA / "inner7/val_users.csv"},
+    "inner8": {"fit": DATA / "inner8/val_train.csv", "users": DATA / "inner8/val_users.csv"},
 }
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

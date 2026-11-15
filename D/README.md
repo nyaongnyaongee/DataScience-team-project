@@ -2,9 +2,9 @@
 
 모든 val 점수는 팀 공통 split `f0dfad2f4431a876`에서 키트 `teamkit.py score`로 잰 micro Recall@20(분모 137,041)입니다. test는 실제로 제출한 것만 적었습니다.
 
-- 실험 461줄 전체 기록과 실험 ID 대응: `experiments_D.csv`
+- 실험 548줄 전체 기록과 실험 ID 대응: `experiments_D.csv`
 - 제출 기록 상세와 팀원용 앙상블 파일: `SUBMISSIONS.md` (Drive 링크 포함)
-- 실험별 계획·결과·실행 기록: `reports/*/` (2026-11-14 이후 실험)
+- 실험별 계획·결과·실행 기록: `reports/*/` (2026-11-14 이후 실험). 2026-11-15 실험 요약: `reports/20261115-overnight/result.md`
 
 ## 실험 표
 
@@ -45,6 +45,28 @@
 | D033 | Reranker 개수형 피처 → 백분위 | user_n, user_span → fit 내 백분위 (v5 파일, 미제출) | 0.06064 | |
 | D034 | Reranker 입력 보강 | 5-seed 입력, iALS d512, 이력 최대·최근 cosine 피처 | 0.06114 | |
 | D035 | 팀원 C LightGCN을 RRF로 추가 | v3 / blend6에 LightGCN 가중치 ∈ {0.3,0.5,1} → 모두 하락 | 0.05679 | |
+| D036 | 팀원 B BM25-Shrink 이식 | item IDF, k 2000, shrink 50, power 0.5, pop 0.4 (B 노트북 셀 3–4) → B061과 같은 점수 | 0.04291 | |
+| D037 | 팀원 C LightGCN 이식 | C 코드 원문, 3층 d128, 575 epoch 고정(val_truth 미사용) | 0.03605 | |
+| D038 | 팀원 C SimpleX 이식 | C011 X01 설정, 650 epoch 고정 | 0.03711 | |
+| D039 | blend6 + 팀원 모델 RRF | BM25 / LightGCN / SimpleX 가중치 ∈ {0.3,0.5,1}, 셋 다 → 모두 하락 | 0.05733 | |
+| D040 | Reranker + 팀원 모델 3개 | v4 설정, 후보·피처 모델 10개 (BM25만 추가 0.06102) | 0.06118 | |
+| D041 | 블렌드 결합 방식 | RRF c ∈ {10,20,30}, minmax, mix(minmax+RRF) r ∈ {0.25…0.9} → 최고 RRF c20 | 0.05776 | |
+| D042 | BM25 grid | k ∈ {200…4000}, pop, shrink, power, b → 최고 k 4000, b 0.25 | 0.04359 | |
+| D043 | LightGCN·SimpleX 3-seed RRF | seed 42·0·1 | 0.03830 / 0.03971 | |
+| D044 | Reranker 후보 모델당 100개 | topn 50 → 100 | 0.06109 | |
+| D045 | D040 seed 5개 평균 | 단일 평균 0.06109 ± 0.00032 | 0.06134 | |
+| D046 | iALS d1024 | reg ∈ {50,100,130,200} → 최고 reg 100 (주변 reg에서 크게 하락) | 0.04240 | |
+| D047 | CatBoost YetiRank reranker | depth 6, lr 0.05, GPU | 0.06051 | |
+| D048 | Reranker 내부 split 2개 학습 | inner(seed 7) + inner2(seed 8). early stopping 유저 분리 수정 후 재실행 0.06161 | 0.06171 | |
+| D049 | 팀원 C SGL·NCL 이식 + reranker | SGL 525 epoch 0.03583, NCL 425 epoch 0.03551 | 0.06110 | |
+| D050 | Reranker 입력 교체 | D042 BM25 + LightGCN·SimpleX 3-seed | 0.06153 | |
+| D051 | Reranker 내부 split 3개 | + inner3(seed 9) | 0.06218 | |
+| D052 | D050 입력 + split 2개 | | 0.06157 | |
+| D053 | **v6** D051 설정 seed 5개 평균 | 단일 평균 0.06183 ± 0.00028 | 0.06206 | **0.06847** |
+| D054 | 내부 split 5개 | + inner4·5 (seed 10·11), seed 0 | 0.06216 | |
+| D055 | **v7** split 5개 seed 5개 평균 | 단일 평균 0.06217, seed 2 0.06248 | 0.06235 | **0.06858** |
+| D056 | 내부 split 8개 | + inner6·7·8 (seed 12·13·14), seed 0 | 0.06215 | |
+| D057 | split 3개 + reranker 크게 | leaves 63, min_leaf 1000, seed 0 | 0.06229 | |
 
 ## 코드
 
@@ -61,6 +83,11 @@
 | `D027-D028_SeedsGroupWeights.sh`, `D028_group_combo.py` | D027–D028 | seed 추가, 그룹별 가중치 |
 | `D030-D034_Reranker.sh` | D030–D034 | `src/rerank.py` |
 | `D035_Blend_with_C_LightGCN.sh` | D035 | 팀원 C 파일 블렌드 |
+| `D036_D042_BM25.sh` | D036, D042 | `src/cf.py bm25` (팀원 B 방식 이식) |
+| `D037-D038_D043_D049_TeamModels_C.sh` | D037–D038, D043, D049 | `src/team_models.py` + `src/ext/` (팀원 C 코드 원문 복사) |
+| `D039_D041_Blend_TeamModels.sh` | D039, D041 | `src/blend.py` |
+| `D040-D057_Reranker_TeamModels_MultiSplit.sh` | D040, D044–D045, D047–D057 | `src/rerank.py` (`--train-modes` 다중 split, `--algo catboost`) |
+| `D046_iALS_d1024.sh` | D046 | `src/cf.py ials` |
 
 `src/`의 공통 모듈: `common.py`(데이터·추천·저장), `features.py`(MiniLM·CLIP·TF-IDF 특성), `evaluate.py`(키트 score 호출 + 기록), `download_images.py`(item_meta의 이미지 URL 다운로드).
 

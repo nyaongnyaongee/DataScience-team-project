@@ -4,6 +4,7 @@
 방식:
   rrf    : Σ w_m / (c + rank_m)
   minmax : Σ w_m · (유저별 min-max 정규화 점수)
+  mix    : Σ w_m · [r · minmax_m + (1−r) · (c+1)/(c + rank_m)]   (B 노트북 방식과 다름: 모델별 top-100 안에서만 minmax, 없는 아이템 0점)
 리스트에 없는 아이템은 그 모델에서 0점. top-100은 이미 본 아이템이 빠져 있다.
 
 예) python src/blend.py --inputs content_fuse_1_0.5_1_k10_pop7 vbpr_fuse_..._e100_s0 \
@@ -24,7 +25,8 @@ def load_top(name: str, mode: str) -> pd.DataFrame:
     return pd.read_csv(C.RESULTS / f"{name}_{mode}_top100.csv.gz")
 
 
-def blend(tops: list[pd.DataFrame], weights: list[float], method: str, c: float = 60.0) -> pd.DataFrame:
+def blend(tops: list[pd.DataFrame], weights: list[float], method: str, c: float = 60.0,
+          mix: float = 0.5) -> pd.DataFrame:
     parts = []
     for df, w in zip(tops, weights):
         df = df[["user_id", "item_id", "score", "rank"]].copy()
@@ -34,6 +36,11 @@ def blend(tops: list[pd.DataFrame], weights: list[float], method: str, c: float 
             g = df.groupby("user_id")["score"]
             lo, hi = g.transform("min"), g.transform("max")
             df["s"] = w * (df["score"] - lo) / (hi - lo).replace(0, 1)
+        elif method == "mix":
+            g = df.groupby("user_id")["score"]
+            lo, hi = g.transform("min"), g.transform("max")
+            mm = (df["score"] - lo) / (hi - lo).replace(0, 1)
+            df["s"] = w * (mix * mm + (1 - mix) * (c + 1) / (c + df["rank"]))
         else:
             raise ValueError(method)
         parts.append(df[["user_id", "item_id", "s"]])
@@ -47,8 +54,9 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--inputs", nargs="+", required=True)
     p.add_argument("--weights", nargs="+", type=float)
-    p.add_argument("--method", default="rrf", choices=["rrf", "minmax"])
+    p.add_argument("--method", default="rrf", choices=["rrf", "minmax", "mix"])
     p.add_argument("--rrf-c", type=float, default=60.0)
+    p.add_argument("--mix", type=float, default=0.5, help="mix: minmax 비율 r")
     p.add_argument("--mode", default="val", choices=list(C.MODES))
     p.add_argument("--name", required=True)
     p.add_argument("--no-log", action="store_true")
@@ -57,7 +65,7 @@ def main() -> None:
     assert len(w) == len(a.inputs)
 
     _, users = C.load_fit(a.mode)
-    out = blend([load_top(n, a.mode) for n in a.inputs], w, a.method, a.rrf_c)
+    out = blend([load_top(n, a.mode) for n in a.inputs], w, a.method, a.rrf_c, a.mix)
     counts = out.groupby("user_id").size()
     assert (counts.reindex(users).fillna(0) >= 20).all(), "어떤 유저는 후보가 20개 미만"
     out = out.set_index("user_id").loc[users].reset_index()
@@ -68,7 +76,7 @@ def main() -> None:
     pred = C.save_outputs(a.name, a.mode, users, items, scores)
     if a.mode == "val":
         from evaluate import evaluate
-        desc = f"{a.method} " + " + ".join(f"{x}*{n_}" for x, n_ in zip(w, a.inputs))
+        desc = f"{a.method}" + (f" r{a.mix:g}" if a.method == "mix" else "") + (f" c{a.rrf_c:g}" if a.method != "minmax" else "") + " " + " + ".join(f"{x}*{n_}" for x, n_ in zip(w, a.inputs))
         evaluate(pred, a.name, extra_inputs="blend", notes=desc, log=not a.no_log)
     else:
         print(f"wrote {pred}")

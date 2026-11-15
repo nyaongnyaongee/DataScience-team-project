@@ -212,8 +212,29 @@ def hist_sims(df, u, i, st: Static, names, L: int = 64, recent: int = 5, B: int 
     return out
 
 
-def load_truth_inner() -> np.ndarray:
-    tr = pd.read_csv(C.DATA / "inner/val_truth.csv")
+class CatWrap:
+    """CatBoostRanker(YetiRank)을 lgb Booster처럼 predict/best_iteration으로 쓰게 감싼다."""
+
+    def __init__(self, trd, vad, fcols, a, seed):
+        from catboost import CatBoostRanker, Pool
+        trd = trd.sort_values("user_id", kind="stable")
+        vad = vad.sort_values("user_id", kind="stable")
+        self.m = CatBoostRanker(loss_function="YetiRank", iterations=a.rounds, learning_rate=a.lr,
+                                depth=a.depth, random_seed=seed, task_type="GPU", devices="0",
+                                eval_metric="NDCG:top=20", od_type="Iter", od_wait=100,
+                                metric_period=50, verbose=100)
+        self.m.fit(Pool(trd[fcols], trd["label"], group_id=trd["user_id"]),
+                   eval_set=Pool(vad[fcols], vad["label"], group_id=vad["user_id"]), use_best_model=True)
+        self.best_iteration = self.m.get_best_iteration()
+
+    def predict(self, X, num_iteration=None):
+        return self.m.predict(X)
+
+
+def load_truth_inner(mode: str = "inner") -> np.ndarray:
+    """내부 split의 정답 (val_train을 다시 나눈 것). 공통 val_truth가 아님."""
+    assert mode.startswith("inner")
+    tr = pd.read_csv(C.DATA / f"{mode}/val_truth.csv")
     return np.sort(keys(tr["user_id"].to_numpy(), tr["item_id"].to_numpy()))
 
 
@@ -231,16 +252,26 @@ def main() -> None:
     ap.add_argument("--seeds", type=int, nargs="+", default=[0], help="여러 개면 예측을 평균")
     ap.add_argument("--robust", action="store_true", help="개수형 피처를 fit 내 상대값으로")
     ap.add_argument("--extra", action="store_true", help="이력 최대·최근 cosine 피처 추가")
+    ap.add_argument("--train-modes", nargs="+", default=["inner"], help="reranker 학습에 쓸 내부 split들")
+    ap.add_argument("--algo", default="lgb", choices=["lgb", "catboost"], help="catboost: YetiRank (GPU)")
+    ap.add_argument("--depth", type=int, default=6, help="catboost depth")
     ap.add_argument("--no-log", action="store_true")
     a = ap.parse_args()
 
     st = Static()
-    tr = build("inner", a.models, a.topn, st, a.robust, a.extra)
-    truth = load_truth_inner()
-    ck = keys(tr["user_id"].to_numpy(), tr["item_id"].to_numpy())
-    pos = np.searchsorted(truth, ck).clip(max=len(truth) - 1)
-    tr["label"] = (truth[pos] == ck).astype(np.int8)
-    print(f"[inner] candidate recall (truth covered) {tr['label'].sum() / len(truth):.4f}", flush=True)
+    parts = []
+    for si, tm in enumerate(a.train_modes):
+        t_ = build(tm, a.models, a.topn, st, a.robust, a.extra)
+        truth = load_truth_inner(tm)
+        ck = keys(t_["user_id"].to_numpy(), t_["item_id"].to_numpy())
+        pos = np.searchsorted(truth, ck).clip(max=len(truth) - 1)
+        t_["label"] = (truth[pos] == ck).astype(np.int8)
+        print(f"[{tm}] candidate recall (truth covered) {t_['label'].sum() / len(truth):.4f}", flush=True)
+        # split마다 같은 유저가 다시 나오므로 그룹 키가 겹치지 않게 user_id를 옮긴다 (피처 계산은 끝난 뒤)
+        t_["user_id"] = t_["user_id"] + si * C.N_USERS
+        parts.append(t_)
+    tr = pd.concat(parts, ignore_index=True) if len(parts) > 1 else parts[0]
+    del parts
     # 양성 후보가 있는 유저만 학습 (없으면 lambdarank gradient 0)
     has = tr.groupby("user_id")["label"].transform("max") > 0
     tr = tr[has]
@@ -253,11 +284,29 @@ def main() -> None:
     models = []
     for seed in a.seeds:
         rng = np.random.default_rng(seed)
-        va_users = set(rng.choice(tr_users, size=len(tr_users) // 10, replace=False).tolist())
-        is_va = tr["user_id"].isin(va_users).to_numpy()
+        if len(a.train_modes) == 1:
+            va_users = set(rng.choice(tr_users, size=len(tr_users) // 10, replace=False).tolist())
+            is_va = tr["user_id"].isin(va_users).to_numpy()
+        else:
+            # split 여러 개: 같은 실제 유저가 학습과 early stopping 검증에 동시에 들어가지 않게 실제 user_id로 나눈다
+            real = np.unique(tr_users % C.N_USERS)
+            va_real = rng.choice(real, size=len(real) // 10, replace=False)
+            is_va = (tr["user_id"] % C.N_USERS).isin(va_real).to_numpy()
         params = dict(objective=a.objective, metric="ndcg", eval_at=[20], learning_rate=a.lr, num_leaves=a.leaves,
                       min_data_in_leaf=a.min_leaf, feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1,
                       lambdarank_truncation_level=40, seed=seed, verbose=-1)
+        if a.algo == "catboost":
+            model = CatWrap(tr[~is_va], tr[is_va], fcols, a, seed)
+            try:
+                imp = pd.Series(model.m.get_feature_importance(type="PredictionValuesChange"),
+                                index=fcols).sort_values(ascending=False)
+            except Exception as e:  # 랭킹 손실은 일부 중요도 유형을 지원하지 않음
+                print(f"feature importance 생략: {e}", flush=True)
+                imp = pd.Series(dtype=float)
+            print(f"[seed {seed}] best_iter {model.best_iteration} top features:",
+                  ", ".join(f"{k}={v:.1f}" for k, v in imp.head(15).items()), flush=True)
+            models.append(model)
+            continue
         model = lgb.train(params, ds(tr[~is_va]), a.rounds, valid_sets=[ds(tr[is_va])],
                           callbacks=[lgb.early_stopping(100), lgb.log_evaluation(100)])
         imp = pd.Series(model.feature_importance("gain"), index=fcols).sort_values(ascending=False)
@@ -267,9 +316,9 @@ def main() -> None:
         models.append(model)
     del tr
 
-    desc = (f"{a.objective} lr{a.lr} leaves{a.leaves} minleaf{a.min_leaf} topn{a.topn}"
+    desc = (("catboost YetiRank depth%d " % a.depth if a.algo == "catboost" else "") + f"{a.objective} lr{a.lr} leaves{a.leaves} minleaf{a.min_leaf} topn{a.topn}"
             f"{' robust' if a.robust else ''}{' extra' if a.extra else ''} seeds {'/'.join(map(str, a.seeds))}"
-            f" iters {'/'.join(str(m.best_iteration) for m in models)} models " + "+".join(a.models))
+            + (f" train {'+'.join(a.train_modes)}" if a.train_modes != ["inner"] else "") + f" iters {'/'.join(str(m.best_iteration) for m in models)} models " + "+".join(a.models))
 
     def write(te, name, mode, users, seed_tag):
         te = te.sort_values(["user_id", "pred", "item_id"], ascending=[True, False, True])
